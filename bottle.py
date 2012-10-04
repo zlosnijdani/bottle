@@ -2348,8 +2348,9 @@ class ServerAdapter(object):
         pass
 
     def __repr__(self):
-        args = ', '.join(['%s=%s'%(k,repr(v)) for k, v in self.options.items()])
-        return "%s(%s)" % (self.__class__.__name__, args)
+        args = ' '.join(['%s=%r' % a for a in self.options.items()])
+        name = self.__class__.__name__
+        return "<%s host='%s:%d' %s>" % (name, self.host, self.port, args)
 
 
 class CGIServer(ServerAdapter):
@@ -2486,6 +2487,7 @@ class GeventServer(ServerAdapter):
         * `fast` (default: False) uses libevent's http server, but has some
           issues: No streaming, no pipelining, no SSL.
     """
+    gevent = True
     def run(self, handler):
         from gevent import wsgi, pywsgi, local
         if not isinstance(_lctx, local.local):
@@ -2494,7 +2496,6 @@ class GeventServer(ServerAdapter):
         if not self.options.get('fast'): wsgi = pywsgi
         log = None if self.quiet else 'default'
         wsgi.WSGIServer((self.host, self.port), handler, log=log).serve_forever()
-
 
 class GunicornServer(ServerAdapter):
     """ Untested. See http://gunicorn.org/configure.html for options. """
@@ -2615,11 +2616,10 @@ def load_app(target):
         default_app.remove(tmp) # Remove the temporary added default application
         NORUN = nr_old
 
-_debug = debug
-def run(app=None, server='wsgiref', host='127.0.0.1', port=8080,
-        interval=1, reloader=False, quiet=False, plugins=None,
-        debug=False, **kargs):
-    """ Start a server instance. This method blocks until the server terminates.
+
+class Runner(object):
+    """ Server launcher and runtime state mashine. You are probably looking
+        for :func:`run`.
 
         :param app: WSGI application or target string supported by
                :func:`load_app`. (default: :func:`default_app`)
@@ -2635,119 +2635,128 @@ def run(app=None, server='wsgiref', host='127.0.0.1', port=8080,
         :param quiet: Suppress output to stdout and stderr? (default: False)
         :param options: Options passed to the server adapter.
      """
-    if NORUN: return
-    if reloader and not os.environ.get('BOTTLE_CHILD'):
-        try:
-            lockfile = None
-            fd, lockfile = tempfile.mkstemp(prefix='bottle.', suffix='.lock')
-            os.close(fd) # We only need this file to exist. We never write to it
-            while os.path.exists(lockfile):
-                args = [sys.executable] + sys.argv
-                environ = os.environ.copy()
-                environ['BOTTLE_CHILD'] = 'true'
-                environ['BOTTLE_LOCKFILE'] = lockfile
-                p = subprocess.Popen(args, env=environ)
-                while p.poll() is None: # Busy wait...
-                    os.utime(lockfile, None) # I am alive!
-                    time.sleep(interval)
-                if p.poll() != 3:
-                    if os.path.exists(lockfile): os.unlink(lockfile)
-                    sys.exit(p.poll())
-        except KeyboardInterrupt:
-            pass
-        finally:
-            if os.path.exists(lockfile):
-                os.unlink(lockfile)
-        return
 
-    try:
-        _debug(debug)
-        app = app or default_app()
-        if isinstance(app, basestring):
-            app = load_app(app)
-        if not callable(app):
-            raise ValueError("Application is not callable: %r" % app)
+    STATUS_RELOAD = 3
+    STATUS_EXIT   = 0
+    gevent = False
 
-        for plugin in plugins or []:
-            app.install(plugin)
-
-        if server in server_names:
-            server = server_names.get(server)
-        if isinstance(server, basestring):
-            server = load(server)
-        if isinstance(server, type):
-            server = server(host=host, port=port, **kargs)
-        if not isinstance(server, ServerAdapter):
-            raise ValueError("Unknown or unsupported server: %r" % server)
-
-        server.quiet = server.quiet or quiet
-        if not server.quiet:
-            _stderr("Bottle v%s server starting up (using %s)...\n" % (__version__, repr(server)))
-            _stderr("Listening on http://%s:%d/\n" % (server.host, server.port))
-            _stderr("Hit Ctrl-C to quit.\n\n")
-
-        if reloader:
-            lockfile = os.environ.get('BOTTLE_LOCKFILE')
-            bgcheck = FileCheckerThread(lockfile, interval)
-            with bgcheck:
-                server.run(app)
-            if bgcheck.status == 'reload':
-                sys.exit(3)
-        else:
-            server.run(app)
-    except KeyboardInterrupt:
-        pass
-    except (SystemExit, MemoryError):
-        raise
-    except:
-        if not reloader: raise
-        if not getattr(server, 'quiet', quiet):
-            print_exc()
-        time.sleep(interval)
-        sys.exit(3)
-
-
-
-class FileCheckerThread(threading.Thread):
-    ''' Interrupt main-thread as soon as a changed module file is detected,
-        the lockfile gets deleted or gets to old. '''
-
-    def __init__(self, lockfile, interval):
-        threading.Thread.__init__(self)
-        self.lockfile, self.interval = lockfile, interval
-        #: Is one of 'reload', 'error' or 'exit'
-        self.status = None
+    def __init__(self, app=None, server='wsgiref', host='127.0.0.1', port=8080,
+                interval=1, reloader=False, quiet=False, plugins=None,
+                debug=False, **options):
+        self.__dict__.update(vars())
+        self.debug = self.debug or DEBUG
+        self.interval = max(1, self.interval)
 
     def run(self):
+        if NORUN: return
+        if os.environ.get('BOTTLE_CHILD'):
+            self._run_child()
+        elif self.reloader:
+            self._run_observer()
+        else:
+            self._run_server()
+
+    def _run_server(self):
+        ''' Actually run the server loop '''
+        debug(self.debug)
+        self.app = self.app or default_app()
+        if isinstance(self.app, basestring):
+            self.app = load_app(self.app)
+        if not callable(self.app):
+            raise ValueError("Application is not callable: %r" % self.app)
+
+        for plugin in self.plugins or []:
+            self.app.install(plugin)
+
+        if isinstance(self.server, basestring):
+            if self.server not in server_names:
+                raise ValueError("Unknown server adapter: %r" % self.server)
+            self.server = server_names[self.server]
+        if isinstance(self.server, type):
+            self.server = self.server(host=host, port=port, **self.options)
+
+        self.quiet = self.server.quiet = self.quiet or self.server.quiet
+        if not self.quiet:
+            _stderr("Bottle v%s server starting up...\n" % __version__)
+            _stderr(" %r\n" % (self.server, ))
+            _stderr("Hit Ctrl-C to quit.\n\n")
+
+        try:
+            self.server.run(app)
+        except KeyboardInterrupt:
+            pass
+
+    def _run_observer(self):
+        ''' Start and restart the server in a new process.'''
+        fd, self.lockfile = tempfile.mkstemp(prefix='bottle.', suffix='.lock')
+        os.close(fd) # We only need this file to exist. We never write to it
+        while os.path.exists(self.lockfile):
+            args = [sys.executable] + sys.argv
+            environ = os.environ.copy()
+            environ['BOTTLE_CHILD'] = 'true'
+            environ['BOTTLE_LOCKFILE'] = self.lockfile
+            try:
+                p = subprocess.Popen(args, env=environ)
+                while p.poll() is None: # Busy wait...
+                    os.utime(self.lockfile, None) # I am alive!
+                    self.sleep(self.interval)
+                if p.poll() != self.STATUS_RELOAD:
+                    sys.exit(p.poll())
+            except KeyboardInterrupt:
+                break
+            finally:
+                if os.path.exists(self.lockfile):
+                    os.unlink(self.lockfile)
+
+    def _run_child(self):
+        ''' Start as a self-terminating server loop.'''
+        self.is_child = True
+        try:
+            self.lockfile = os.environ.get('BOTTLE_LOCKFILE')
+            self.spawn_reload_checker()
+            self._run_server() # Supresses SIGINT, no need to catch it here
+        except (SystemExit, MemoryError):
+            raise
+        except:
+            if not self.quiet: print_exc()
+            self.reloader_status == 'reload'
+        finally:
+            self.terminate_reload_checker()
+        if self.reloader_status == 'reload':
+            self.exit(self.STATUS_RELOAD)
+
+    def file_checker_loop(self):
+        self.reload_status = None
+        self.files_to_check = dict()
+
+        # Shortcuts
         exists = os.path.exists
         mtime = lambda path: os.stat(path).st_mtime
-        files = dict()
 
         for module in list(sys.modules.values()):
             path = getattr(module, '__file__', '')
             if path[-4:] in ('.pyo', '.pyc'): path = path[:-1]
-            if path and exists(path): files[path] = mtime(path)
+            if path and exists(path): self.files_to_check[path] = mtime(path)
 
-        while not self.status:
+        while not self.reload_status:
             if not exists(self.lockfile)\
             or mtime(self.lockfile) < time.time() - self.interval - 5:
-                self.status = 'error'
-                thread.interrupt_main()
-            for path, lmtime in list(files.items()):
+                self.reload_status = 'error'
+                break
+            for path, lmtime in list(self.files_to_check.items()):
                 if not exists(path) or mtime(path) > lmtime:
-                    self.status = 'reload'
-                    thread.interrupt_main()
+                    self.reload_status = 'reload'
                     break
-            time.sleep(self.interval)
+            self.sleep(self.interval)
 
-    def __enter__(self):
-        self.start()
+        if self.reload_status:
+            self.interrupt_main()
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self.status: self.status = 'exit' # silent exit
-        self.join()
-        return exc_type is not None and issubclass(exc_type, KeyboardInterrupt)
 
+def run(*args, **kwargs):
+    Runner(*args, **kwargs).run()
+
+run.__doc__ = Runner.__doc__
 
 
 
