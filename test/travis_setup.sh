@@ -3,13 +3,7 @@
 set -e
 set -x
 
-# Coverage 4.0 doesn't support Python 3.2
-if [[ $TRAVIS_PYTHON_VERSION == 3.2 ]]; then
-    pip install coverage==3.7.1
-else
-    pip install -U coverage
-fi
-
+pip install -U coverage
 pip install -U markerlib # Fix Ubuntu 12.04 "ImportError: No module named _markerlib"
 pip install coveralls
 
