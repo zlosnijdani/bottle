@@ -10,7 +10,7 @@ else
     pip install -U coverage
 fi
 
-pip install -U setuptools # Fix Ubuntu 12.04 "ImportError: No module named _markerlib"
+pip install -U markerlib # Fix Ubuntu 12.04 "ImportError: No module named _markerlib"
 pip install coveralls
 
 # Server back-ends and template engines. Not all back-ends support all python versions and we only want to test for 2.7 and 3.6 to keep things sane
