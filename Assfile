@@ -20,8 +20,8 @@ tasks:
       - gotoenv
     template: pymodule
     src: setup.py
+    shell: rm {prg:self.venv}/bin/bottle.py
     then:
-      shell: rm {prg:self.venv}/bin/bottle.py 
       template: deactivate@pymodule
 
   clean:
