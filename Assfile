@@ -21,9 +21,7 @@ tasks:
     template: pymodule
     src: setup.py
     then:
-      shell: rm {prg:self.venv}/bin/bottle.py
-      then:
-        template: deactivate@pymodule
+      template: deactivate@pymodule
 
   clean:
     recursive: false
