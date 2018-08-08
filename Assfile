@@ -21,6 +21,7 @@ tasks:
     template: pymodule
     src: setup.py
     then:
+      shell: rm .venv/bin/bottle.py 
       template: deactivate@pymodule
 
   clean:
